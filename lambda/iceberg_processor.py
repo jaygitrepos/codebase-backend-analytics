@@ -19,12 +19,13 @@ def lambda_handler(event, context):
     
     # Define the funnel stages and their respective drop-off rates
     funnel_stages = [
-        {"page_name": "Product Page", "drop_off_rate": 10},  # 100% start
-        {"page_name": "Address Phone Number Details", "drop_off_rate": 20},  # 60% continue
-        {"page_name": "Investing Experience", "drop_off_rate": 5},  # 55% continue
-        {"page_name": "Personal Financial Info", "drop_off_rate": 5},  # 50% continue
-        {"page_name": "Legal Disclosure", "drop_off_rate": 30},  # 20% continue
-        {"page_name": "Summary and Submit", "drop_off_rate": 0}  # All remaining users complete
+        {"page_name": "landing", "drop_off_rate": 10},  # 100% start
+        {"page_name": "login_details", "drop_off_rate": 20},  # 60% continue
+        {"page_name": "identity", "drop_off_rate": 6},  # 55% continue
+        {"page_name": "finance", "drop_off_rate": 5},  # 50% continue
+        {"page_name": "interests", "drop_off_rate": 10},  # 20% continue
+        {"page_name": "terms", "drop_off_rate": 15} , # All remaining users complete
+        {"page_name": "success", "drop_off_rate": 0} , # All remaining users complete
     ]
     
     # Statistics to track events and user progression

@@ -19,7 +19,7 @@ from aws_cdk import (
 )
 from constructs import Construct
 from datetime import datetime
-
+import aws_cdk as cdk
 class IcebergAnalyticsStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, quicksight_identity_region=None, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -53,17 +53,8 @@ class IcebergAnalyticsStack(Stack):
                 name="events_table",
                 description="Events data in Iceberg format",
                 table_type="EXTERNAL_TABLE",
-                parameters={
-                    "table_type": "ICEBERG",
-                    "format": "iceberg"
-                },
                 storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
                     location=f"s3://{iceberg_bucket.bucket_name}/events/",
-                    input_format="org.apache.hadoop.mapred.InputFormat",
-                    output_format="org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                    serde_info=glue.CfnTable.SerdeInfoProperty(
-                        serialization_library="org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
-                    ),
                     columns=[
                         glue.CfnTable.ColumnProperty(name="userid", type="string"),
                         glue.CfnTable.ColumnProperty(name="eventname", type="string"),
@@ -72,15 +63,24 @@ class IcebergAnalyticsStack(Stack):
                         glue.CfnTable.ColumnProperty(name="campaigncode", type="string")
                     ]
                 )
+            ),
+            open_table_format_input=glue.CfnTable.OpenTableFormatInputProperty(
+                iceberg_input=glue.CfnTable.IcebergInputProperty(
+                    metadata_operation="CREATE",
+                    version="2"
+                )
             )
         )
 
+        
+
         # 4. Create Kinesis Data Stream
-        data_stream = kinesis.Stream(
-            self, "EventsDataStream",
-            stream_mode=kinesis.StreamMode.ON_DEMAND,
-            retention_period=Duration.hours(24)
-        )
+        # Code moved to front end app
+        #data_stream = kinesis.Stream(
+        #    self, "EventsDataStream",
+        #    stream_mode=kinesis.StreamMode.ON_DEMAND,
+        #    retention_period=Duration.hours(24)
+        #)
 
         # 5. Create role for Firehose with permissions to write to Iceberg
         firehose_role = iam.Role(
@@ -89,7 +89,7 @@ class IcebergAnalyticsStack(Stack):
         )
         
         # Grant Firehose permissions to read from Kinesis
-        data_stream.grant_read(firehose_role)
+        #data_stream.grant_read(firehose_role)
         
         # Grant Firehose permissions to write to S3
         iceberg_bucket.grant_read_write(firehose_role)
@@ -134,7 +134,7 @@ class IcebergAnalyticsStack(Stack):
             delivery_stream_name="events-to-iceberg",
             delivery_stream_type="KinesisStreamAsSource",
             kinesis_stream_source_configuration=firehose.CfnDeliveryStream.KinesisStreamSourceConfigurationProperty(
-                kinesis_stream_arn=data_stream.stream_arn,
+                kinesis_stream_arn="arn:aws:kinesis:"+self.region+":"+self.account+":stream/webdevcon2025",
                 role_arn=firehose_role.role_arn
             ),
             
@@ -170,7 +170,7 @@ class IcebergAnalyticsStack(Stack):
             )
         )
         firehose_stream.node.add_dependency(policy_dependency)
-        # 7. Create Lambda function for data processing with permission to write to Kinesis
+        # 7. Create Lambda function for data simulation with permission to write to Kinesis
         lambda_role = iam.Role(
             self, "LambdaExecutionRole",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
@@ -180,7 +180,7 @@ class IcebergAnalyticsStack(Stack):
         )
         
         # Grant Lambda permissions to write to Kinesis Data Stream
-        data_stream.grant_write(lambda_role)
+        #data_stream.grant_write(lambda_role)
         
         # Other permissions for Lambda
         lambda_role.add_to_policy(
@@ -197,6 +197,17 @@ class IcebergAnalyticsStack(Stack):
             )
         )
 
+        lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "kinesis:PutRecord",
+                ],
+                resources=[
+                    "arn:aws:kinesis:"+self.region+":"+self.account+":stream/webdevcon2025"
+                ]
+            )
+        )
+
         lambda_function = lambda_.Function(
             self, "IcebergDataProcessor",
             runtime=lambda_.Runtime.PYTHON_3_9,
@@ -204,7 +215,7 @@ class IcebergAnalyticsStack(Stack):
             handler="iceberg_processor.handler",
             role=lambda_role,
             environment={
-                "KINESIS_STREAM_NAME": data_stream.stream_name,
+                "KINESIS_STREAM_NAME": "webdevcon2025",
                 "ICEBERG_BUCKET": iceberg_bucket.bucket_name,
                 "DATABASE_NAME": iceberg_database.ref,
                 "TABLE_NAME": "events_table"
@@ -212,148 +223,16 @@ class IcebergAnalyticsStack(Stack):
             timeout=Duration.minutes(3)
         )
 
-        # 8. QuickSight setup with Amazon Q Pro
-        # Create a Lambda function to handle QuickSight user creation and Q Pro subscriptions
-        quicksight_setup_role = iam.Role(
-            self, "QuickSightSetupRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
-            ]
-        )
-        
-        # Add custom policies for QuickSight user management and Amazon Q
-        quicksight_setup_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "quicksight:CreateUser",
-                    "quicksight:RegisterUser",
-                    "quicksight:CreateAdmin",
-                    "quicksight:CreateNamespace",
-                    "quicksight:Subscribe",
-                    "quicksight:CreateAccountSubscription",
-                    "quicksight:UpdateUser",
-                    "quicksight:UpdateSubscription",
-                    "quicksight:CreateGroup",
-                    "quicksight:CreateGroupMembership",
-                    "quicksight:DescribeAccountSubscription",
-                    "sso:ListInstances",
-                    'ds:CreateAlias',
-                    'ds:AuthorizeApplication',
-                    'ds:UnauthorizeApplication',
-                    'ds:CreateIdentityPoolDirectory',
-                    'ds:CreateDirectory',
-                    'ds:DescribeDirectories',
-                    
-                ],
-                resources=["*"]  # Scope down in production
-            )
-        )
+        # 8. Athena results bucket
 
-        # Lambda function to create QuickSight users and subscribe to Amazon Q Pro
-        quicksight_setup_lambda = lambda_.Function(
-            self, "QuickSightSetupFunction",
-            runtime=lambda_.Runtime.PYTHON_3_9,
-            code=lambda_.Code.from_asset("lambda_quicksight"),
-            handler="quicksight_setup.handler",
-            role=quicksight_setup_role,
-            timeout=Duration.minutes(5),
-            environment={
-                "QUICKSIGHT_IDENTITY_REGION": self.quicksight_identity_region,
-                "AWS_ACCOUNT_ID": self.account,
-                "USERS": "user1@example.com,user2@example.com,user3@example.com"  # Customize with your users
-            }
-        )
-        
-        # Custom resource to trigger QuickSight setup
-        quicksight_provider = custom_resources.Provider(
-            self, "QuickSightSetupProvider",
-            on_event_handler=quicksight_setup_lambda,
-        )
-        
-        quicksight_setup_resource = CustomResource(
-            self, "QuickSightSetupResource",
-            service_token=quicksight_provider.service_token,
-            properties={
-                "timestamp": str(datetime.now())  # Force execution on each deployment
-            }
-        )
-
-        artifacts_bucket = s3.Bucket(
+        athena_results_bucket = s3.Bucket(
             self, 
-            "BuildArtifactsBucket",
+            "AthenaResultsBucket",
             auto_delete_objects=True,  # Optional: Clean up on stack deletion
             removal_policy=RemovalPolicy.DESTROY  # Optional: Delete bucket on stack deletion
         )
+
+                
         
-        # Deploy local build artifacts to S3
-        deployment = s3deploy.BucketDeployment(
-            self,
-            "DeployBuildArtifacts",
-            sources=[s3deploy.Source.asset(local_build_path)],
-            destination_bucket=artifacts_bucket,
-            destination_key_prefix="build"
-        )
+
         
-        # Create role for Amplify
-        amplify_role = iam.Role(
-            self,
-            "AmplifyS3AccessRole",
-            assumed_by=iam.ServicePrincipal("amplify.amazonaws.com")
-        )
-        
-        # Grant Amplify access to the bucket
-        artifacts_bucket.grant_read(amplify_role)
-        
-        # Create the Amplify app
-        amplify_app = amplify.CfnApp(
-            self,
-            "MyAmplifyApp",
-            name="my-automated-local-build-app",
-            iam_service_role=amplify_role.role_arn,
-            # No build spec needed for manual deployments
-        )
-        
-        # Create a branch for deployment
-        main_branch = amplify.CfnBranch(
-            self,
-            "MainBranch",
-            app_id=amplify_app.attr_app_id,
-            branch_name="main",
-            enable_auto_build=False,  # No auto-build from git
-            stage="PRODUCTION"
-        )
-        main_branch.add_dependency(amplify_app)
-        
-        # Create a custom resource to start the deployment after everything is set up
-        deploy_to_amplify = custom_resources.AwsCustomResource(
-            self,
-            "DeployToAmplify",
-            on_create=custom_resources.AwsSdkCall(
-                service="Amplify",
-                action="startDeployment",
-                parameters={
-                    "appId": amplify_app.attr_app_id,
-                    "branchName": "main",
-                    "sourceUrl": f"s3://{artifacts_bucket.bucket_name}/build"
-                },
-                physical_resource_id=custom_resources.PhysicalResourceId.of("AmplifyDeployment")
-            ),
-            policy=custom_resources.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=custom_resources.AwsCustomResource,
-				policy=custom_resources.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=custom_resources.AwsCustomResourcePolicy.ANY_RESOURCE
-            )
-        )
-        
-        # Make sure the deployment happens after the branch is created and artifacts are uploaded
-        deploy_to_amplify.node.add_dependency(main_branch)
-        deploy_to_amplify.node.add_dependency(deployment)
-        
-        # Outputs for reference
-        CfnOutput(
-            self,
-            "AmplifyAppId",
-            value=amplify_app.attr_app_id,
-            description="Amplify App ID"
-        )
