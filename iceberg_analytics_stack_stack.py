@@ -4,18 +4,11 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_iam as iam,
     aws_s3 as s3,
-    aws_quicksight as quicksight,
     aws_kinesis as kinesis,
     aws_kinesisfirehose as firehose,
-    CfnOutput,
     RemovalPolicy,
-    CustomResource,
-    custom_resources,
     Duration,
-    aws_amplify as amplify,
-    aws_secretsmanager as secretsmanager,
-    Fn,
-    aws_s3_deployment as s3deploy
+    aws_logs  as logs
 )
 from constructs import Construct
 from datetime import datetime
@@ -58,8 +51,9 @@ class IcebergAnalyticsStack(Stack):
                     columns=[
                         glue.CfnTable.ColumnProperty(name="userid", type="string"),
                         glue.CfnTable.ColumnProperty(name="eventname", type="string"),
+                        glue.CfnTable.ColumnProperty(name="eventdate", type="timestamp"),
                         glue.CfnTable.ColumnProperty(name="pagename", type="string"),
-                        glue.CfnTable.ColumnProperty(name="eventdate", type="date"),
+                        glue.CfnTable.ColumnProperty(name="journeycode", type="string"),
                         glue.CfnTable.ColumnProperty(name="campaigncode", type="string")
                     ]
                 )
@@ -127,6 +121,46 @@ class IcebergAnalyticsStack(Stack):
                 ]
             )
         )
+        firehose_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:PutLogEvents",
+                    
+                ],
+                resources=[
+                    "*",                    
+                ]
+            )
+        )
+        # Create CloudWatch Log Group and Stream for Firehose errors
+        firehose_log_group = logs.LogGroup(
+            self, "FirehoseLogGroup",
+            log_group_name="/aws/kinesisfirehose/events-to-iceberg",
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+            retention=logs.RetentionDays.ONE_WEEK
+        )
+
+        firehose_log_stream = logs.LogStream(
+            self, "FirehoseLogStream",
+            log_group=firehose_log_group,
+            log_stream_name="FirehoseErrors"
+        )
+        # Add additional permissions for CloudWatch Logs
+        firehose_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:PutLogEvents",
+                    "logs:CreateLogStream",
+                    "logs:CreateLogGroup",
+                    "logs:DescribeLogStreams",
+                    "logs:DescribeLogGroups"
+                ],
+                resources=[
+                    firehose_log_group.log_group_arn,
+                    f"{firehose_log_group.log_group_arn}:log-stream:*"
+                ]
+            )
+        )
         policy_dependency = firehose_role.node.find_child('DefaultPolicy')
         # 6. Create Firehose delivery stream that writes to Iceberg
         firehose_stream = firehose.CfnDeliveryStream(
@@ -147,9 +181,14 @@ class IcebergAnalyticsStack(Stack):
 #                table_name="events_table",
 #                database_name=iceberg_database.ref,
                 retry_options=firehose.CfnDeliveryStream.RetryOptionsProperty(
-                          duration_in_seconds=123
+                          duration_in_seconds=10
                 ),
-                
+                # Add CloudWatch logging configuration
+                cloud_watch_logging_options=firehose.CfnDeliveryStream.CloudWatchLoggingOptionsProperty(
+                    enabled=True,
+                    log_group_name=firehose_log_group.log_group_name,
+                    log_stream_name=firehose_log_stream.log_stream_name
+                ),
                 s3_configuration=firehose.CfnDeliveryStream.S3DestinationConfigurationProperty(
                     bucket_arn=iceberg_bucket.bucket_arn,
                     role_arn=firehose_role.role_arn,
@@ -157,7 +196,7 @@ class IcebergAnalyticsStack(Stack):
                     error_output_prefix="firehose/errors/",
                     buffering_hints=firehose.CfnDeliveryStream.BufferingHintsProperty(
                         interval_in_seconds=60,
-                        size_in_m_bs=5
+                        size_in_m_bs=1
                     )
                 ),
                 destination_table_configuration_list=[firehose.CfnDeliveryStream.DestinationTableConfigurationProperty(
@@ -165,12 +204,11 @@ class IcebergAnalyticsStack(Stack):
                     destination_table_name="events_table",
                     # the properties below are optional
                     s3_error_output_prefix="s3ErrorOutputPrefix",
-                    unique_keys=["uniqueKeys"]
                 )],
             )
         )
         firehose_stream.node.add_dependency(policy_dependency)
-        # 7. Create Lambda function for data simulation with permission to write to Kinesis
+        # 7. Create Lambda function for data processing with permission to write to Kinesis
         lambda_role = iam.Role(
             self, "LambdaExecutionRole",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
@@ -212,7 +250,7 @@ class IcebergAnalyticsStack(Stack):
             self, "IcebergDataProcessor",
             runtime=lambda_.Runtime.PYTHON_3_9,
             code=lambda_.Code.from_asset("lambda"),
-            handler="iceberg_processor.handler",
+            handler="iceberg_processor.lambda_handler",
             role=lambda_role,
             environment={
                 "KINESIS_STREAM_NAME": "webdevcon2025",
@@ -220,7 +258,7 @@ class IcebergAnalyticsStack(Stack):
                 "DATABASE_NAME": iceberg_database.ref,
                 "TABLE_NAME": "events_table"
             },
-            timeout=Duration.minutes(3)
+            timeout=Duration.minutes(6)
         )
 
         # 8. Athena results bucket

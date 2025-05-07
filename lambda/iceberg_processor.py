@@ -9,45 +9,77 @@ def lambda_handler(event, context):
     """
     Lambda function to generate user funnel events spread over past week and send to Kinesis Data Stream
     """
+    # Get experiment from input event or default to 'historical'
+    experiment = 'before_feature'  # Default value
+    
+    # Extract experiment_name from input event if it exists
+    if event and isinstance(event, dict):
+        experiment = event.get('experiment_name', 'before_feature')
+    
     # Get parameters from environment variables or use defaults
-    stream_name = os.environ.get('STREAM_NAME', 'UserEventStream')
+    stream_name = os.environ.get('KINESIS_STREAM_NAME', 'webdevcon2025')
     region = os.environ.get('AWS_REGION', 'us-east-1')
-    num_users = int(os.environ.get('NUM_USERS', '10000'))
+    num_users = int(os.environ.get('NUM_USERS', '1000'))
+    
+    print(f"Running experiment: {experiment} for {num_users} users")
     
     # Initialize Kinesis client
     kinesis_client = boto3.client('kinesis', region_name=region)
     
     # Define the funnel stages and their respective drop-off rates
-    funnel_stages = [
+    funnel_stages_before_feature = [
         {"page_name": "landing", "drop_off_rate": 10},  # 100% start
-        {"page_name": "login_details", "drop_off_rate": 20},  # 60% continue
+        {"page_name": "login", "drop_off_rate": 20},  # 60% continue
         {"page_name": "identity", "drop_off_rate": 6},  # 55% continue
         {"page_name": "finance", "drop_off_rate": 5},  # 50% continue
         {"page_name": "interests", "drop_off_rate": 10},  # 20% continue
-        {"page_name": "terms", "drop_off_rate": 15} , # All remaining users complete
-        {"page_name": "success", "drop_off_rate": 0} , # All remaining users complete
+        {"page_name": "terms", "drop_off_rate": 15},  # All remaining users complete
+        {"page_name": "success", "drop_off_rate": 0}  # All remaining users complete
     ]
     
+    funnel_stages_after_feature = [
+        {"page_name": "landing", "drop_off_rate": 10},  # 100% start
+        {"page_name": "login", "drop_off_rate": 20},  # 60% continue
+        {"page_name": "identity", "drop_off_rate": 6},  # 55% continue
+        {"page_name": "finance", "drop_off_rate": 5},  # 50% continue
+        {"page_name": "interests", "drop_off_rate": 10},  # 20% continue
+        {"page_name": "terms", "drop_off_rate": 15},  # All remaining users complete
+        {"page_name": "success", "drop_off_rate": 0}  # All remaining users complete
+    ]
     # Statistics to track events and user progression
     stats = {
         "total_users_processed": num_users,
         "total_events_sent": 0,
         "page_counts": {},
         "events_by_day": {},
-        "campaign_counts": {"campaign1": 0, "campaign2": 0, "none": 0}
+        "campaign_counts": {"campaign1": 0, "campaign2": 0, "none": 0},
+        "experiment": experiment
     }
     
-    # Get current date and calculate date range
+    # Get current date and calculate date range based on experiment type
     current_date = datetime.datetime.now()
-    date_range_start = current_date - datetime.timedelta(days=7)
+    
+    if experiment.lower() == 'after_feature':
+        
+        funnel_stages   =funnel_stages_after_feature
+        date_range_start = current_date
+        date_range_end = current_date + datetime.timedelta(days=7)
+    else:
+        
+        funnel_stages   =funnel_stages_before_feature
+        date_range_start = current_date - datetime.timedelta(days=7)
+        date_range_end = current_date - datetime.timedelta(days=1)
     
     # Process the specified number of user journeys
     for i in range(num_users):
         user_id = str(uuid.uuid4())
         
-        # Randomly select a start date within the past week
+        # Calculate time difference in days between start and end date
+        days_range = (date_range_end - date_range_start).days
+        
+        # Randomly select a start date within the configured time range
         start_date = date_range_start + datetime.timedelta(
-            days=random.randint(0, 6),  # 0-6 days after range start
+            days=random.randint(0, max(0, days_range)),
             hours=random.randint(0, 23),
             minutes=random.randint(0, 59)
         )
@@ -109,15 +141,24 @@ def lambda_handler(event, context):
             "percentage": round(percentage, 1)
         })
     
+    # Determine date range for the response
+    date_range_info = {
+        "experiment_type": experiment,
+        "date_range_start": date_range_start.isoformat(),
+        "date_range_end": date_range_end.isoformat()
+    }
+    
     # Return execution statistics
     return {
         'statusCode': 200,
         'body': {
+            'experiment': experiment,
             'users_processed': num_users,
             'events_generated': stats["total_events_sent"],
             'funnel_statistics': funnel_stats,
             'events_by_day': stats["events_by_day"],
-            'campaign_distribution': stats["campaign_counts"]
+            'campaign_distribution': stats["campaign_counts"],
+            'date_range': date_range_info
         }
     }
 
@@ -143,7 +184,8 @@ def simulate_user_journey(user_id, funnel_stages, start_date, campaign_code):
             "userid": user_id,
             "eventname": f"view_{stage['page_name'].lower().replace(' ', '_')}",
             "eventdate": event_time.isoformat(),
-            "pagename": stage["page_name"]
+            "pagename": stage["page_name"],
+            "journeystatus": get_journey_status(i, len(funnel_stages) - 1)
         }
         
         # Add campaign code if it exists
@@ -153,3 +195,13 @@ def simulate_user_journey(user_id, funnel_stages, start_date, campaign_code):
         events.append(event)
     
     return events
+
+def get_journey_status(current_stage, total_stages):
+    """
+    Determine journey status based on current stage
+    """
+    
+    if current_stage == total_stages:
+        return "Completed"
+    else:
+        return "In Progress"
